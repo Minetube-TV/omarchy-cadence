@@ -59,7 +59,25 @@ Panel {
       ? strings.t("panel.nextFocus", "Next: %1").arg(root.nextModeLabel)
       : strings.t("panel.nextAfterBreak", "Next: %1 min break → %2")
           .arg(numberText(service.breakMinutes)).arg(root.nextModeLabel)
-  readonly property string glyph: root.breakPhase ? "\u{f117c}" : "\u{f0430}"
+  readonly property string glyph: root.breakPhase ? "\u{f0176}" : "\u{f05da}"
+  readonly property string studyState: root.hostWidget ? root.hostWidget.studyState : "idle"
+  readonly property color stateColor: root.hostWidget ? root.hostWidget.stateColor : root.contentForeground
+
+  // A small, quiet piece of ASCII art per state, in the muted label tone
+  // the weather and world clock popups use; only the caption takes colour.
+  readonly property color dimForeground: Qt.darker(root.contentForeground, 1.5)
+  readonly property var asciiArt: ({
+    "studying": [" _______ _______ ", "|~~ ~~~ |~~~ ~~ |", "|~~~ ~~ |~ ~~~~ |", "'-------'-------'"],
+    "break":    ["  ) ) )  ", " .-----.", " |     |]", " '-----' "],
+    "paused":   [" .-. .-. ", " | | | | ", " | | | | ", " '-' '-' "],
+    "idle":     ["       z ", "  ___ z  ", " |___|   ", " |___|   "]
+  })
+  readonly property var asciiCaption: ({
+    "studying": "LOCK IN",
+    "break": "STEP AWAY",
+    "paused": "ON HOLD",
+    "idle": "CYCLE DONE · START WHEN READY"
+  })
 
   readonly property string phaseLabel: !service
     ? strings.t("widget.name", "Cadence")
@@ -231,10 +249,37 @@ Panel {
             Text {
               textFormat: Text.PlainText
               text: root.glyph
-              color: root.contentForeground
+              color: root.stateColor
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.display
             }
+          }
+        }
+
+        // ---- ASCII art for the current state.
+        Column {
+          width: parent.width
+          spacing: Style.space(4)
+
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: (root.asciiArt[root.studyState] || root.asciiArt.idle).join("\n")
+            textFormat: Text.PlainText
+            color: root.dimForeground
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
+            lineHeight: 0.9
+          }
+
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: root.asciiCaption[root.studyState] || ""
+            textFormat: Text.PlainText
+            color: root.stateColor
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
+            font.letterSpacing: 2
+            Behavior on color { ColorAnimation { duration: Style.duration(160) } }
           }
         }
 
@@ -265,7 +310,7 @@ Panel {
             width: Math.max(parent.height, parent.width * root.progress)
             height: parent.height
             radius: height / 2
-            color: root.contentForeground
+            color: root.stateColor
 
             Behavior on width {
               NumberAnimation {

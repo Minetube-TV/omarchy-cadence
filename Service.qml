@@ -324,6 +324,28 @@ Item {
     onTriggered: service.tick()
   }
 
+  // Reset "sessions today" at midnight even while nothing is running; the
+  // model only rolls the day over when a block starts or ends.
+  function rollDay() {
+    if (!stateLoaded) return
+    var snapshot = stateSnapshot()
+    var before = snapshot.sessionsDate
+    FocusModel.ensureToday(snapshot, Date.now())
+    if (snapshot.sessionsDate === before) return
+    sessionsDate = snapshot.sessionsDate
+    sessionsToday = snapshot.sessionsToday
+    dirty = true
+    saveSoon()
+  }
+
+  Timer {
+    interval: 60000
+    repeat: true
+    running: true
+    triggeredOnStart: true
+    onTriggered: service.rollDay()
+  }
+
   Timer {
     id: saveTimer
     interval: 200
