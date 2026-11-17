@@ -68,6 +68,17 @@ Item {
   readonly property double shortBreakElapsedMs: onShortBreak ? Math.max(0, nowMs - shortBreakAt) : 0
   readonly property bool shortBreakOver: onShortBreak && shortBreakElapsedMs >= shortBreakLimitMs
 
+  // ---- Laptop off / asleep (johann-study) --------------------------------
+  // A work block only runs while the laptop does. While it runs, the shell
+  // notes it is alive (saved every 30 s). After a shutdown, crash, empty
+  // battery or suspend, the block is paused at the last moment the shell was
+  // alive, so the time the laptop was off is not used up. Shell reloads are
+  // quick and keep the block running.
+  readonly property int offlineGapMs: 2 * 60000
+  readonly property int aliveSaveMs: 30000
+  property double lastTickAt: 0
+  property double aliveSavedAt: 0
+
   // ---- Study log (johann-study) ------------------------------------------
   // Every start, pause, resume, finish, reset and short break is appended as
   // one JSON line, so real study habits can be analysed later. Nothing reads
@@ -271,6 +282,7 @@ Item {
   // ---- Timer control ----------------------------------------------------
   function start() {
     var now = Date.now()
+    lastTickAt = now
     endShortBreak(now)
     applyResult(FocusModel.start(stateSnapshot(), configSnapshot(), now), now, "start")
   }
@@ -355,6 +367,18 @@ Item {
 
   function tick() {
     var now = Date.now()
+    if (running && phase === "work" && lastTickAt > 0 && now - lastTickAt > offlineGapMs) {
+      // The machine was asleep: pause where it stopped.
+      var at = lastTickAt
+      lastTickAt = 0
+      applyResult(FocusModel.pause(stateSnapshot(), configSnapshot(), at), at, "offline")
+      appendLog([logRecord("offline_pause", stateSnapshot(), now, { offMin: minutesOf(now - at) })])
+      nowMs = now
+      rollDay()
+      return
+    }
+    lastTickAt = now
+    if (running && phase === "work" && now - aliveSavedAt >= aliveSaveMs) saveSoon()
     nowMs = now
     checkShortBreak(now)
     var result = FocusModel.tick(stateSnapshot(), configSnapshot(), now)
@@ -450,6 +474,21 @@ Item {
     var now = Date.now()
     var parsed = FocusModel.parseState(raw)
     var savedDate = parsed ? parsed.sessionsDate : ""
+
+    // The laptop was off (shutdown, crash, empty battery) while a work block
+    // ran: pause it where the shell was last alive.
+    var offlineAt = 0
+    try {
+      var alive = Number((JSON.parse(String(raw || "")).johannStudy || {}).aliveAt) || 0
+      if (parsed && parsed.running && parsed.phase === "work" && alive > 0
+          && now - alive > offlineGapMs && parsed.endsAt > alive) {
+        parsed.remainingMs = parsed.endsAt - alive
+        parsed.running = false
+        parsed.paused = true
+        parsed.endsAt = 0
+        offlineAt = alive
+      }
+    } catch (e) {}
     applyResult(FocusModel.resolveLoadedState(parsed, configSnapshot(), now), now, "load")
 
     // Restore a short break that was in progress when the shell reloaded.
@@ -461,6 +500,10 @@ Item {
         shortBreakNotified = extra.shortBreakNotified === true
       }
     } catch (e) {}
+
+    if (offlineAt > 0)
+      appendLog([logRecord("offline_pause", stateSnapshot(), now, { offMin: minutesOf(now - offlineAt) })])
+    lastTickAt = running ? now : 0
 
     // Booted (or the shell restarted) on a later day than the state was saved.
     resetStaleDay(savedDate, now)
@@ -476,7 +519,9 @@ Item {
     saveTimer.stop()
     if (!stateLoaded || !storeReady) return
     var serialized = FocusModel.serializeState(stateSnapshot(), Date.now())
-    serialized.johannStudy = { shortBreakAt: shortBreakAt, shortBreakNotified: shortBreakNotified }
+    var savedAt = Date.now()
+    aliveSavedAt = savedAt
+    serialized.johannStudy = { shortBreakAt: shortBreakAt, shortBreakNotified: shortBreakNotified, aliveAt: savedAt }
     stateFile.setText(JSON.stringify(serialized))
     dirty = false
   }
