@@ -33,12 +33,15 @@ ShellRoot {
     property int breakMinutes: 20
     property string phaseLabel: "Deep Focus"
     property string statusLabel: "Running"
+    property bool onShortBreak: false
+    property bool shortBreakOver: false
     function configure(values) {}
     function start() {}
     function pause() {}
     function toggle() {}
     function reset() {}
     function skipBreak() {}
+    function shortBreak() {}
     function selectMode(value) {}
     function startMode(value) {}
   }
@@ -128,15 +131,17 @@ ShellRoot {
       return
     }
 
+    // johann-study bar: a state icon and colour plus a numberless progress
+    // bar; the countdown itself is only in the panel.
     if (root.step === 1) {
       if (!root.waitFor(root.widget !== null && root.widget.service === mockService, 5000, "bar widget did not resolve its service")) return
       root.check(root.widget.implicitWidth > 0, "widget has a positive implicit width")
       root.check(root.widget.implicitHeight > 0, "widget has a positive implicit height")
-      root.check(root.widget.timeText === "01:30", "widget formats the shared countdown")
+      root.check(root.widget.studyState === "studying", "running work block reads as studying")
+      root.check(root.widget.glyph === "\u{f05da}", "studying shows the book")
+      root.check(Math.abs(root.widget.progress - 0.2) < 1e-6, "progress follows the block")
+      root.check(root.widget.tooltipText.indexOf("Study time") >= 0, "tooltip says it is study time")
       root.check(root.widget.tooltipText.indexOf("Deep Focus") >= 0, "tooltip names the phase")
-      root.check(root.widget.tooltipText.indexOf("01:30") >= 0, "tooltip carries the countdown")
-      root.check(root.widget.tooltipText.indexOf("Running") >= 0, "tooltip carries the state")
-      root.check(root.widget.glyph === "\u{f0430}", "work phase shows the pulse glyph")
       root.check(root.widget.active === true, "running session is active")
       try {
         root.widget.open()
@@ -144,19 +149,63 @@ ShellRoot {
       } catch (error) {
         root.fail("open/close threw: " + error)
       }
-      mockService.phase = "break"
-      mockService.phaseLabel = "Break"
       mockService.running = false
-      mockService.statusLabel = "Ready"
+      mockService.paused = true
+      mockService.onShortBreak = true
       root.next(2)
       return
     }
 
     if (root.step === 2) {
+      root.check(root.widget.studyState === "shortbreak", "short break is reported")
+      root.check(root.widget.glyph === "\u{f0176}", "short break shows the coffee cup")
+      root.check(root.widget.tooltipText.indexOf("Short break") >= 0, "tooltip names the short break")
+      mockService.shortBreakOver = true
+      root.next(3)
+      return
+    }
+
+    if (root.step === 3) {
+      root.check(root.widget.studyState === "shortbreakover", "an overrun short break is reported")
+      root.check(root.widget.tooltipText.indexOf("5 minute break is up") >= 0, "tooltip says the break is up")
+      root.check(root.widget.stateColor === root.widget.themeYellow, "an overrun short break is yellow")
+      mockService.onShortBreak = false
+      mockService.shortBreakOver = false
+      mockService.paused = false
+      mockService.running = true
+      mockService.phase = "break"
+      mockService.phaseLabel = "Break"
+      root.next(4)
+      return
+    }
+
+    if (root.step === 4) {
       root.check(root.widget.breakPhase === true, "break phase is reported to the widget")
-      root.check(root.widget.glyph === "\u{f117c}", "break phase shows the stretching figure")
-      root.check(root.widget.active === false, "stopped session is dimmed")
-      root.check(root.widget.tooltipText.indexOf("Break") >= 0, "tooltip follows the break phase")
+      root.check(root.widget.studyState === "break", "running break reads as break")
+      root.check(root.widget.glyph === "\u{f0176}", "break shows the coffee cup")
+      root.check(root.widget.stateColor === root.widget.themeGreen, "break is green")
+      mockService.running = false
+      mockService.paused = true
+      root.next(5)
+      return
+    }
+
+    if (root.step === 5) {
+      root.check(root.widget.studyState === "paused", "paused break reads as paused")
+      root.check(root.widget.glyph === "\u{f03e4}", "paused shows the pause glyph")
+      root.check(root.widget.tooltipText.indexOf("Break · paused") >= 0, "tooltip says the break is paused")
+      mockService.paused = false
+      mockService.phase = "work"
+      mockService.phaseLabel = "Deep Focus"
+      root.next(6)
+      return
+    }
+
+    if (root.step === 6) {
+      root.check(root.widget.studyState === "idle", "nothing running reads as idle")
+      root.check(root.widget.progress === 0, "idle shows an empty progress bar")
+      root.check(root.widget.active === false, "stopped session is not active")
+      root.check(root.widget.tooltipText.indexOf("Not studying") >= 0, "tooltip invites a new block")
       root.finish()
     }
   }
