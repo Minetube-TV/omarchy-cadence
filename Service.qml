@@ -57,6 +57,23 @@ Item {
   property bool storeReady: false
   property bool dirty: false
 
+  // ---- Short break (johann-study) ----------------------------------------
+  // A short break inside a work block: the focus timer pauses, a 5 minute
+  // countdown runs, and when it is up a notification says so. Focus only
+  // continues when the user clicks to resume. Persisted next to the state.
+  readonly property int shortBreakLimitMs: 5 * 60000
+  property double shortBreakAt: 0          // epoch ms; 0 = no short break
+  property bool shortBreakNotified: false
+  readonly property bool onShortBreak: shortBreakAt > 0
+  readonly property double shortBreakElapsedMs: onShortBreak ? Math.max(0, nowMs - shortBreakAt) : 0
+  readonly property bool shortBreakOver: onShortBreak && shortBreakElapsedMs >= shortBreakLimitMs
+
+  // ---- Study log (johann-study) ------------------------------------------
+  // Every start, pause, resume, finish, reset and short break is appended as
+  // one JSON line, so real study habits can be analysed later. Nothing reads
+  // it in the shell; it is only a record.
+  readonly property string eventLogPath: (Quickshell.env("HOME") || "") + "/.local/state/study-hours/events.jsonl"
+
   readonly property double effectiveRemainingMs: running
     ? Math.max(0, endsAt - nowMs)
     : Math.max(0, remainingMs)
@@ -102,12 +119,86 @@ Item {
     }
   }
 
+  // ---- Study log --------------------------------------------------------
+  function localIso(ms) {
+    var d = new Date(ms)
+    var off = -d.getTimezoneOffset()
+    var sign = off >= 0 ? "+" : "-"
+    off = Math.abs(off)
+    function p(n) { return n < 10 ? "0" + n : String(n) }
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate())
+      + "T" + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds())
+      + sign + p(Math.floor(off / 60)) + ":" + p(off % 60)
+  }
+
+  function minutesOf(ms) {
+    return Math.round((Number(ms) || 0) / 6000) / 10
+  }
+
+  // Build one log record. `s` is the state the event describes.
+  function logRecord(event, s, now, extra) {
+    var remaining = s.running ? Math.max(0, s.endsAt - now) : Math.max(0, s.remainingMs)
+    var record = {
+      ts: localIso(now),
+      event: event,
+      mode: s.sessionMode,
+      phase: s.phase,
+      plannedMin: minutesOf(s.totalMs),
+      elapsedMin: minutesOf(Math.max(0, s.totalMs - remaining)),
+      remainingMin: minutesOf(remaining)
+    }
+    if (extra) for (var k in extra) record[k] = extra[k]
+    return JSON.stringify(record)
+  }
+
+  // Derive what happened from the state before and after a transition.
+  function transitionRecords(prev, next, effects, now, cause) {
+    var lines = []
+    if (cause === "reset" && (prev.running || prev.paused)) {
+      lines.push(logRecord(prev.phase === "work" ? "focus_reset" : "break_reset", prev, now))
+    }
+    if (cause === "skipBreak" && prev.phase === "break") {
+      lines.push(logRecord("break_skip", prev, now))
+    }
+    if (prev.running && !next.running && next.paused && prev.phase === next.phase) {
+      lines.push(logRecord(next.phase === "work" ? "focus_pause" : "break_pause", next, now,
+        cause === "shortBreak" ? { reason: "short_break" } : null))
+    }
+    if ((prev.running || prev.paused) && prev.phase === "break" && next.phase === "work"
+        && !effects.notify && cause !== "skipBreak") {
+      lines.push(logRecord("break_end_early", prev, now))
+    }
+    if (effects.notify === "workDone") {
+      lines.push(logRecord("focus_complete", prev, now))
+    } else if (effects.notify === "breakDone") {
+      lines.push(logRecord("break_complete", prev, now))
+    }
+    var wasRunningSame = prev.running && prev.phase === next.phase && !effects.notify
+    if (next.running && !wasRunningSame) {
+      var resumed = prev.paused && prev.phase === next.phase && !prev.running
+      var kind = next.phase === "work" ? "focus" : "break"
+      lines.push(logRecord(kind + (resumed ? "_resume" : "_start"), next, now))
+    }
+    return lines
+  }
+
+  function appendLog(lines) {
+    if (!lines || lines.length === 0) return
+    Quickshell.execDetached(["sh", "-c",
+      'mkdir -p -- "$(dirname -- "$1")" && printf "%s\\n" "$2" >> "$1"',
+      "cadence-log", eventLogPath, lines.join("\n")])
+  }
+
   // Apply a pure transition and run the effects it asked for.
-  function applyResult(result, now) {
+  function applyResult(result, now, cause) {
     if (!result || !result.state) return
 
     var next = result.state
     var effects = result.effects || {}
+    if (stateLoaded && cause !== "load" && cause !== "dayReset") {
+      var logNow = now !== undefined ? now : Date.now()
+      appendLog(transitionRecords(stateSnapshot(), next, effects, logNow, cause || ""))
+    }
 
     mode = next.mode
     sessionMode = next.sessionMode
@@ -166,12 +257,13 @@ Item {
   // ---- Timer control ----------------------------------------------------
   function start() {
     var now = Date.now()
-    applyResult(FocusModel.start(stateSnapshot(), configSnapshot(), now), now)
+    endShortBreak(now)
+    applyResult(FocusModel.start(stateSnapshot(), configSnapshot(), now), now, "start")
   }
 
   function pause() {
     var now = Date.now()
-    applyResult(FocusModel.pause(stateSnapshot(), configSnapshot(), now), now)
+    applyResult(FocusModel.pause(stateSnapshot(), configSnapshot(), now), now, "pause")
   }
 
   function toggle() {
@@ -181,12 +273,57 @@ Item {
 
   function reset() {
     var now = Date.now()
-    applyResult(FocusModel.reset(stateSnapshot(), configSnapshot()), now)
+    endShortBreak(now)
+    applyResult(FocusModel.reset(stateSnapshot(), configSnapshot()), now, "reset")
   }
 
   function skipBreak() {
     var now = Date.now()
-    applyResult(FocusModel.skipBreak(stateSnapshot(), configSnapshot()), now)
+    applyResult(FocusModel.skipBreak(stateSnapshot(), configSnapshot()), now, "skipBreak")
+  }
+
+  // ---- Short break ------------------------------------------------------
+  // Pause the running work block for a short break. Resuming (start/toggle)
+  // ends it; there is no automatic resume.
+  function shortBreak() {
+    if (!running || phase !== "work" || onShortBreak) return
+    var now = Date.now()
+    applyResult(FocusModel.pause(stateSnapshot(), configSnapshot(), now), now, "shortBreak")
+    if (!paused) return   // the block had just ended instead
+    shortBreakAt = now
+    shortBreakNotified = false
+    nowMs = now
+    appendLog([logRecord("short_break_start", stateSnapshot(), now)])
+    dirty = true
+    saveSoon()
+  }
+
+  function endShortBreak(now) {
+    if (!onShortBreak) return
+    appendLog([logRecord("short_break_end", stateSnapshot(), now,
+      { breakMin: minutesOf(now - shortBreakAt), overMin: minutesOf(Math.max(0, now - shortBreakAt - shortBreakLimitMs)) })])
+    shortBreakAt = 0
+    shortBreakNotified = false
+    dirty = true
+    saveSoon()
+  }
+
+  function checkShortBreak(now) {
+    if (!onShortBreak || shortBreakNotified) return
+    if (now - shortBreakAt < shortBreakLimitMs) return
+    shortBreakNotified = true
+    appendLog([logRecord("short_break_over", stateSnapshot(), now)])
+    dirty = true
+    saveSoon()
+    // Default app name (omarchy-action) so it shows through the focus block's
+    // Do Not Disturb; critical so it stays until dismissed.
+    Util.execArgv([
+      "omarchy-notification-send",
+      "5 minute break is up · " + completionTime(),
+      "Focus is still paused. Continue when you are back.",
+      "-g", "\u{f0176}", "-u", "critical",
+      "--action", "Continue focus", "omarchy-shell", "jimmerioles.cadence", "start"
+    ])
   }
 
   function selectMode(next) {
@@ -205,8 +342,9 @@ Item {
   function tick() {
     var now = Date.now()
     nowMs = now
+    checkShortBreak(now)
     var result = FocusModel.tick(stateSnapshot(), configSnapshot(), now)
-    if (result.effects.save) applyResult(result, now)
+    if (result.effects.save) applyResult(result, now, "tick")
   }
 
   // Kept for the panel tests and for a caller that wants to end a session
@@ -296,7 +434,22 @@ Item {
     }
 
     var now = Date.now()
-    applyResult(FocusModel.resolveLoadedState(FocusModel.parseState(raw), configSnapshot(), now), now)
+    var parsed = FocusModel.parseState(raw)
+    var savedDate = parsed ? parsed.sessionsDate : ""
+    applyResult(FocusModel.resolveLoadedState(parsed, configSnapshot(), now), now, "load")
+
+    // Restore a short break that was in progress when the shell reloaded.
+    try {
+      var extra = JSON.parse(String(raw || "")).johannStudy || {}
+      var at = Number(extra.shortBreakAt) || 0
+      if (at > 0 && at <= now && phase === "work" && paused) {
+        shortBreakAt = at
+        shortBreakNotified = extra.shortBreakNotified === true
+      }
+    } catch (e) {}
+
+    // Booted (or the shell restarted) on a later day than the state was saved.
+    resetStaleDay(savedDate, now)
   }
 
   function saveSoon() {
@@ -308,30 +461,58 @@ Item {
   function saveNow() {
     saveTimer.stop()
     if (!stateLoaded || !storeReady) return
-    stateFile.setText(JSON.stringify(FocusModel.serializeState(stateSnapshot(), Date.now())))
+    var serialized = FocusModel.serializeState(stateSnapshot(), Date.now())
+    serialized.johannStudy = { shortBreakAt: shortBreakAt, shortBreakNotified: shortBreakNotified }
+    stateFile.setText(JSON.stringify(serialized))
     dirty = false
   }
 
   function status() {
-    return JSON.stringify(FocusModel.statusSnapshot(stateSnapshot(), Date.now(), phaseLabel))
+    var snapshot = FocusModel.statusSnapshot(stateSnapshot(), Date.now(), phaseLabel)
+    snapshot.shortBreak = onShortBreak
+    return JSON.stringify(snapshot)
   }
 
   Timer {
     id: ticker
     interval: 250
     repeat: true
-    running: service.running
+    running: service.running || service.onShortBreak
     onTriggered: service.tick()
   }
 
   // Reset "sessions today" at midnight even while nothing is running; the
   // model only rolls the day over when a block starts or ends.
+  // A new day starts with a fresh timer (johann-study): a paused block or a
+  // break left over from yesterday is over. Only a block that is actually
+  // running at midnight (or a short break taken in the last 30 minutes) keeps
+  // going, so studying past midnight is not interrupted.
+  readonly property int shortBreakKeepMs: 30 * 60000
+
+  function resetStaleDay(fromDate, now) {
+    if (!fromDate || fromDate === FocusModel.dateKey(new Date(now))) return
+    if (running) return
+    if (onShortBreak && now - shortBreakAt < shortBreakKeepMs) return
+    var fresh = phase === "work" && !paused && !onShortBreak
+    if (fresh) return
+    endShortBreak(now)
+    appendLog([logRecord("day_reset", stateSnapshot(), now, { from: fromDate })])
+    var s = stateSnapshot()
+    s.phase = "work"
+    s.paused = false
+    applyResult(FocusModel.reset(s, configSnapshot()), now, "dayReset")
+    dirty = true
+    saveSoon()
+  }
+
   function rollDay() {
     if (!stateLoaded) return
+    var now = Date.now()
     var snapshot = stateSnapshot()
     var before = snapshot.sessionsDate
-    FocusModel.ensureToday(snapshot, Date.now())
+    FocusModel.ensureToday(snapshot, now)
     if (snapshot.sessionsDate === before) return
+    resetStaleDay(before, now)
     sessionsDate = snapshot.sessionsDate
     sessionsToday = snapshot.sessionsToday
     dirty = true

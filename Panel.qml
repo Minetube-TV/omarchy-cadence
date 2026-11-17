@@ -32,9 +32,19 @@ Panel {
     return Commons.I18n.formatNumber(value, 0)
   }
 
-  readonly property string timeText: service
-    ? FocusModel.formatClock(service.effectiveRemainingMs, Commons.I18n.formatNumber)
-    : "00:00"
+  readonly property bool onShortBreak: service ? service.onShortBreak === true : false
+  readonly property bool shortBreakOver: service ? service.shortBreakOver === true : false
+  readonly property bool canShortBreak: service
+    ? (service.running && service.phase === "work")
+    : false
+  // On a short break the big readout counts down the 5 minutes, then counts
+  // up how far over it is. Otherwise it is the session countdown.
+  readonly property string timeText: !service ? "00:00"
+    : root.onShortBreak
+      ? (root.shortBreakOver
+        ? "+" + FocusModel.formatClock(service.shortBreakElapsedMs - service.shortBreakLimitMs, Commons.I18n.formatNumber)
+        : FocusModel.formatClock(service.shortBreakLimitMs - service.shortBreakElapsedMs, Commons.I18n.formatNumber))
+      : FocusModel.formatClock(service.effectiveRemainingMs, Commons.I18n.formatNumber)
   readonly property bool breakPhase: service ? service.phase === "break" : false
   readonly property bool modeLocked: service
     ? (service.phase === "work" && service.running)
@@ -59,7 +69,7 @@ Panel {
       ? strings.t("panel.nextFocus", "Next: %1").arg(root.nextModeLabel)
       : strings.t("panel.nextAfterBreak", "Next: %1 min break → %2")
           .arg(numberText(service.breakMinutes)).arg(root.nextModeLabel)
-  readonly property string glyph: root.breakPhase ? "\u{f0176}" : "\u{f05da}"
+  readonly property string glyph: (root.breakPhase || root.onShortBreak) ? "\u{f0176}" : "\u{f05da}"
   readonly property string studyState: root.hostWidget ? root.hostWidget.studyState : "idle"
   readonly property color stateColor: root.hostWidget ? root.hostWidget.stateColor : root.contentForeground
 
@@ -70,17 +80,22 @@ Panel {
     "studying": [" _______ _______ ", "|~~ ~~~ |~~~ ~~ |", "|~~~ ~~ |~ ~~~~ |", "'-------'-------'"],
     "break":    ["  ) ) )  ", " .-----.", " |     |]", " '-----' "],
     "paused":   [" .-. .-. ", " | | | | ", " | | | | ", " '-' '-' "],
-    "idle":     ["       z ", "  ___ z  ", " |___|   ", " |___|   "]
+    "idle":     ["       z ", "  ___ z  ", " |___|   ", " |___|   "],
+    "shortbreak":     ["  ) ) )  ", " .-----.", " |     |]", " '-----' "],
+    "shortbreakover": ["  ) ) )  ", " .-----.", " |     |]", " '-----' "]
   })
   readonly property var asciiCaption: ({
     "studying": "LOCK IN",
     "break": "STEP AWAY",
     "paused": "ON HOLD",
-    "idle": "CYCLE DONE · START WHEN READY"
+    "idle": "CYCLE DONE · START WHEN READY",
+    "shortbreak": "BACK IN 5",
+    "shortbreakover": "5 MIN UP · CONTINUE WHEN READY"
   })
 
   readonly property string phaseLabel: !service
     ? strings.t("widget.name", "Cadence")
+    : root.onShortBreak ? "Short break"
     : root.breakPhase
       ? strings.t("panel.break", "Break")
       : (service.sessionMode === "deep"
@@ -88,6 +103,8 @@ Panel {
         : strings.t("panel.short", "Short Focus"))
   readonly property string phaseMeta: {
     if (!service) return ""
+    if (root.onShortBreak)
+      return "Focus paused · " + FocusModel.formatClock(service.effectiveRemainingMs, Commons.I18n.formatNumber) + " left"
     var minutes = numberText(Math.max(1, Math.round(service.totalMs / 60000)))
     if (root.breakPhase)
       return strings.t("panel.breakMeta", "%1 minute break").arg(minutes)
@@ -100,6 +117,7 @@ Panel {
     ? strings.t("panel.start", "Start")
     : service.running
       ? strings.t("panel.pause", "Pause")
+      : root.onShortBreak ? "Continue focus"
       : service.paused
         ? strings.t("panel.resume", "Resume")
         : root.breakPhase
@@ -188,9 +206,12 @@ Panel {
     if (focusSection === "mode") {
       if (dx !== 0) modeIndex = Math.max(0, Math.min(1, modeIndex + dx))
       else if (dy > 0) focusSection = "transport"
+    } else if (focusSection === "shortbreak") {
+      if (dy < 0) focusSection = "transport"
     } else {
       if (dx !== 0) transportIndex = Math.max(0, Math.min(1, transportIndex + dx))
       else if (dy < 0 && !root.modeLocked) focusSection = "mode"
+      else if (dy > 0 && root.canShortBreak) focusSection = "shortbreak"
     }
   }
 
@@ -201,6 +222,9 @@ Panel {
       if (root.modeLocked) return
       var option = modeOptions[modeIndex]
       if (option) selectMode(option.value)
+    } else if (focusSection === "shortbreak") {
+      if (root.canShortBreak && service) service.shortBreak()
+      focusSection = "transport"
     } else if (transportIndex === 0) {
       toggleTimer()
     } else {
@@ -210,6 +234,7 @@ Panel {
 
   onOpenedChanged: if (opened) resetCursor()
   onModeLockedChanged: if (modeLocked && focusSection === "mode") focusSection = "transport"
+  onCanShortBreakChanged: if (!canShortBreak && focusSection === "shortbreak") focusSection = "transport"
 
   KeyboardPanel {
     id: panel
@@ -459,6 +484,28 @@ Panel {
             fontFamily: root.contentFontFamily
             onClicked: root.secondaryAction()
             onHovered: function(hovered) { if (hovered) root.pointAtTransport(1) }
+          }
+        }
+
+        // ---- Short break: pause focus for a quick 5 minutes (restroom, a
+        //      breather). Focus continues only when "Continue focus" is clicked.
+        Button {
+          width: parent.width
+          visible: root.canShortBreak
+          text: "5 min break"
+          iconText: "\u{f0176}"
+          hasCursor: root.cursorActive && root.focusSection === "shortbreak"
+          bordered: true
+          fontSize: Style.font.bodySmall
+          foreground: root.contentForeground
+          accent: Commons.Color.accent
+          fontFamily: root.contentFontFamily
+          onClicked: if (root.service) root.service.shortBreak()
+          onHovered: function(hovered) {
+            if (!hovered) return
+            root.cursorActive = true
+            root.keyboardCursor = false
+            root.focusSection = "shortbreak"
           }
         }
       }

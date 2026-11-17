@@ -24,12 +24,14 @@ BarWidget {
   // break:    break running        → coffee, green: step away
   // paused:   work or break paused → pause, yellow
   // idle:     nothing running      → book, plain foreground (cycle done, start again)
+  // shortbreak: 5 min break inside a work block → coffee, green; yellow once the 5 min are up
   readonly property bool breakPhase: service ? service.phase === "break" : false
   readonly property string studyState: !service ? "idle"
+    : service.onShortBreak ? (service.shortBreakOver ? "shortbreakover" : "shortbreak")
     : service.running ? (breakPhase ? "break" : "studying")
     : service.paused ? "paused"
     : "idle"
-  readonly property string glyph: studyState === "break" ? "\u{f0176}"
+  readonly property string glyph: (studyState === "break" || studyState === "shortbreak" || studyState === "shortbreakover") ? "\u{f0176}"
     : studyState === "paused" ? "\u{f03e4}"
     : "\u{f05da}"
   readonly property real progress: service && studyState !== "idle" ? service.progress : 0
@@ -40,8 +42,8 @@ BarWidget {
   property color themeYellow: Commons.Color.urgent
   readonly property color baseForeground: root.bar ? root.bar.barForeground : Commons.Color.foreground
   readonly property color stateColor: studyState === "studying" ? Commons.Color.accent
-    : studyState === "break" ? root.themeGreen
-    : studyState === "paused" ? root.themeYellow
+    : (studyState === "break" || studyState === "shortbreak") ? root.themeGreen
+    : (studyState === "paused" || studyState === "shortbreakover") ? root.themeYellow
     : root.baseForeground
 
   function readThemeColors(text) {
@@ -72,6 +74,8 @@ BarWidget {
     if (!service) return strings.t("widget.tooltip", "Cadence timer")
     if (studyState === "studying") return "Study time · " + service.phaseLabel
     if (studyState === "break") return "Break · step away from the desk"
+    if (studyState === "shortbreak") return "Short break · focus paused"
+    if (studyState === "shortbreakover") return "5 minute break is up · right-click to continue"
     if (studyState === "paused") return (breakPhase ? "Break" : service.phaseLabel) + " · paused"
     return "Not studying · click to start a block"
   }
@@ -164,6 +168,7 @@ BarWidget {
     function pause(): void { if (root.service) root.service.pause() }
     function reset(): void { if (root.service) root.service.reset() }
     function skipBreak(): void { if (root.service) root.service.skipBreak() }
+    function shortBreak(): void { if (root.service) root.service.shortBreak() }
     function toggleTimer(): void { if (root.service) root.service.toggle() }
     function setMode(value: string): string { if (root.service) root.service.selectMode(String(value)); return root.service ? root.service.mode : "" }
     function startMode(value: string): void { if (root.service) root.service.startMode(String(value)) }

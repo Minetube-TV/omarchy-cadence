@@ -119,6 +119,7 @@ Cadence exposes its controls through the `jimmerioles.cadence` IPC target.
 | `toggleTimer` | none | Start when stopped; pause when running. |
 | `reset` | none | Reset the current block or break. |
 | `skipBreak` | none | End a break and return to a ready focus block. |
+| `shortBreak` | none | Pause the running work block for a 5 minute short break; `start` continues it. |
 | `setMode` | `deep` or `short` | Select the next session type. Returns the selected mode. |
 | `startMode` | `deep` or `short` | Start a fresh focus block in that mode. Queues while a work block is running or paused; gives way to work during a break. |
 | `open` | none | Open the panel. |
@@ -136,6 +137,7 @@ omarchy-shell jimmerioles.cadence pause
 omarchy-shell jimmerioles.cadence toggleTimer
 omarchy-shell jimmerioles.cadence reset
 omarchy-shell jimmerioles.cadence skipBreak
+omarchy-shell jimmerioles.cadence shortBreak
 omarchy-shell jimmerioles.cadence setMode deep
 omarchy-shell jimmerioles.cadence startMode short
 omarchy-shell jimmerioles.cadence open
