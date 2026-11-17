@@ -182,11 +182,25 @@ Item {
     return lines
   }
 
+  // Lines are queued and written by one writer process at a time, so events
+  // that happen together (short_break_end + focus_resume) always land in the
+  // file in order, as one append.
+  property var pendingLog: []
+  readonly property var logWriteCommand: ["sh", "-c",
+    'mkdir -p -- "$(dirname -- "$1")" && printf "%s\\n" "$2" >> "$1"', "cadence-log"]
+
   function appendLog(lines) {
     if (!lines || lines.length === 0) return
-    Quickshell.execDetached(["sh", "-c",
-      'mkdir -p -- "$(dirname -- "$1")" && printf "%s\\n" "$2" >> "$1"',
-      "cadence-log", eventLogPath, lines.join("\n")])
+    pendingLog = pendingLog.concat(lines)
+    Qt.callLater(flushLog)
+  }
+
+  function flushLog() {
+    if (logWriter.running || pendingLog.length === 0) return
+    var lines = pendingLog
+    pendingLog = []
+    logWriter.command = logWriteCommand.concat([eventLogPath, lines.join("\n")])
+    logWriter.running = true
   }
 
   // Apply a pure transition and run the effects it asked for.
@@ -534,6 +548,15 @@ Item {
   }
 
   Process {
+    id: logWriter
+    running: false
+    onExited: function(code) {
+      if (code !== 0) console.warn("Cadence: could not append to " + service.eventLogPath + " (exit " + code + ")")
+      Qt.callLater(service.flushLog)
+    }
+  }
+
+  Process {
     id: dndQuery
     running: false
     command: ["omarchy-shell", "notifications", "isDnd"]
@@ -571,6 +594,9 @@ Item {
   }
 
   Component.onDestruction: {
+    // Whatever is still queued is handed to a detached writer so it outlives the shell.
+    if (pendingLog.length > 0)
+      Quickshell.execDetached(logWriteCommand.concat([eventLogPath, pendingLog.join("\n")]))
     if (dndOwned) Util.execArgv(["omarchy-shell", "notifications", "setDnd", "false"])
     saveNow()
   }
