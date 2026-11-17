@@ -171,7 +171,7 @@ Item {
     if (cause === "skipBreak" && prev.phase === "break") {
       lines.push(logRecord("break_skip", prev, now))
     }
-    if (prev.running && !next.running && next.paused && prev.phase === next.phase) {
+    if (prev.running && !next.running && next.paused && prev.phase === next.phase && cause !== "offline") {
       lines.push(logRecord(next.phase === "work" ? "focus_pause" : "break_pause", next, now,
         cause === "shortBreak" ? { reason: "short_break" } : null))
     }
@@ -365,15 +365,26 @@ Item {
     applyResult(FocusModel.startMode(stateSnapshot(), configSnapshot(), value, now), now)
   }
 
+  // The machine was asleep while a work block ran: pause it where it stopped.
+  // Runs before anything else looks at the clock after a wake-up (the tick and
+  // the midnight check), so a block asleep over midnight is reset, not kept.
+  function pauseIfWasAsleep(now) {
+    if (!running || phase !== "work" || lastTickAt <= 0 || now - lastTickAt <= offlineGapMs) return false
+    var at = lastTickAt
+    lastTickAt = 0
+    applyResult(FocusModel.pause(stateSnapshot(), configSnapshot(), at), at, "offline")
+    appendLog([offlineRecord(at, now)])
+    nowMs = now
+    return true
+  }
+
+  function offlineRecord(at, now) {
+    return logRecord("offline_pause", stateSnapshot(), now, { pausedAt: localIso(at), offMin: minutesOf(now - at) })
+  }
+
   function tick() {
     var now = Date.now()
-    if (running && phase === "work" && lastTickAt > 0 && now - lastTickAt > offlineGapMs) {
-      // The machine was asleep: pause where it stopped.
-      var at = lastTickAt
-      lastTickAt = 0
-      applyResult(FocusModel.pause(stateSnapshot(), configSnapshot(), at), at, "offline")
-      appendLog([logRecord("offline_pause", stateSnapshot(), now, { offMin: minutesOf(now - at) })])
-      nowMs = now
+    if (pauseIfWasAsleep(now)) {
       rollDay()
       return
     }
@@ -501,8 +512,7 @@ Item {
       }
     } catch (e) {}
 
-    if (offlineAt > 0)
-      appendLog([logRecord("offline_pause", stateSnapshot(), now, { offMin: minutesOf(now - offlineAt) })])
+    if (offlineAt > 0) appendLog([offlineRecord(offlineAt, now)])
     lastTickAt = running ? now : 0
 
     // Booted (or the shell restarted) on a later day than the state was saved.
@@ -567,6 +577,7 @@ Item {
   function rollDay() {
     if (!stateLoaded) return
     var now = Date.now()
+    pauseIfWasAsleep(now)
     var snapshot = stateSnapshot()
     var before = snapshot.sessionsDate
     FocusModel.ensureToday(snapshot, now)
